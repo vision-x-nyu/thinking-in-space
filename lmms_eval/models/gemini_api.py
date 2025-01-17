@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import time
 from typing import List, Tuple
 
@@ -25,8 +26,68 @@ try:
     genai.configure(api_key=GOOGLE_API_KEY)
 
 except Exception as e:
-    eval_logger.error(f"Error importing generativeai: {str(e)}")
+    eval_logger.error(f"Error importing generativeai: {str(e)}, try to install genai by ```pip install google-generativeai```")
     genai = None
+
+OBJ_REL_DISTANCE_TEMPLATE = """
+Measuring from the closest point of each object, which of these objects ({choice_a}, {choice_b}, {choice_c}, {choice_d}) is the closest to the {category}?
+If there are multiple instances of an object category, measure to the closest.
+""".strip()
+
+OBJ_REL_DIRECTION_HARD_TEMPLATE = """
+If I am standing by the {positioning_object} and facing the {orienting_object}, is the {querying_object} to my front-left, front-right, back-left, or back-right?
+The directions refer to the quadrants of a Cartesian plane (if I am standing at the origin and facing along the positive y-axis).
+""".strip()
+
+OBJ_REL_DIRECTION_MEDIUM_TEMPLATE = """
+If I am standing by the {positioning_object} and facing the {orienting_object}, is the {querying_object} to my left, right, or back?
+An object is to my back if I would have to turn at least 135 degrees in order to face it.
+""".strip()
+
+OBJ_REL_DIRECTION_EASY_TEMPLATE = """
+If I am standing by the {positioning_object} and facing the {orienting_object}, is the {querying_object} to the left or the right of the {orienting_object}?
+""".strip()
+
+
+def extract_categories_of_interest(doc):
+    if doc['question_type'].startswith('object_rel_direction'):
+        if doc['question_type'] == "object_rel_direction_hard":
+            template = OBJ_REL_DIRECTION_HARD_TEMPLATE
+        elif doc['question_type'] == "object_rel_direction_medium":
+            template = OBJ_REL_DIRECTION_MEDIUM_TEMPLATE
+        elif doc['question_type'] == "object_rel_direction_easy":
+            template = OBJ_REL_DIRECTION_EASY_TEMPLATE
+        pattern = re.escape(template)
+        pattern = pattern.replace(r'\{positioning_object\}', r'(?P<positioning_object>.+?)')
+        pattern = pattern.replace(r'\{orienting_object\}', r'(?P<orienting_object>.+?)')
+        pattern = pattern.replace(r'\{querying_object\}', r'(?P<querying_object>.+?)')
+    elif doc['question_type'].startswith('object_rel_distance'):
+        pattern = re.escape(OBJ_REL_DISTANCE_TEMPLATE)
+        pattern = pattern.replace(r'\{choice_a\}', r'(?P<choice_a>.+?)')
+        pattern = pattern.replace(r'\{choice_b\}', r'(?P<choice_b>.+?)')
+        pattern = pattern.replace(r'\{choice_c\}', r'(?P<choice_c>.+?)')
+        pattern = pattern.replace(r'\{choice_d\}', r'(?P<choice_d>.+?)')
+        pattern = pattern.replace(r'\{category\}', r'(?P<category>.+?)')
+    
+    match = re.match(pattern, doc['question'])
+    if match:
+        return match.groupdict()
+    else:
+        return None
+
+COGMAP_PROMPT_TEMPLATE = """[Task]
+This video captures an indoor scene. Your objective is to identify specific objects within the video, understand the spatial arrangement of the scene, and estimate the center point of each object, assuming the entire scene is represented by a 10x10 grid.
+
+[Rule]
+1. We provide the categories to care about in this scene: {categories_of_interest}. Focus ONLY on these categories.
+2. Estimate the center location of each instance within the provided categories, assuming the entire scene is represented by a 10x10 grid.
+3. If a category contains multiple instances, include all of them.
+4. Each object's estimated location should accurately reflect its real position in the scene, preserving the relative spatial relationships among all objects.
+
+[Output]
+Present the estimated center locations for each object as a list within a dictionary.
+STRICTLY follow this JSON format:
+{{"category name": [(x_1, y_1), ...], ...}}"""
 
 @register_model("gemini_api")
 class GeminiAPI(lmms):
@@ -143,39 +204,53 @@ class GeminiAPI(lmms):
                 visuals = self.flatten(visuals)
                 visuals = self.convert_video(visuals)
 
-            if visuals != [None]: # always follow gemini's suggestion that take video first
-                chat_session = self.model.start_chat(
-                    history=[
-                        {
-                            "role": "user",
-                            "parts": [visuals[0]]
-                        },
-                    ])
-            else:
-                chat_session = self.model.start_chat()
+            categories_of_interest = extract_categories_of_interest(self.task_dict[task][split][doc_id])
+            assert categories_of_interest is not None
+            categories_of_interest = list(categories_of_interest.values())
+            
+            messages = [COGMAP_PROMPT_TEMPLATE.format(categories_of_interest=categories_of_interest), contexts]
 
-            for attempt in range(5):
-                try:
-                    content = chat_session.send_message(contexts)
-                    content = content.text
-                    break
-                except Exception as e:
-                    eval_logger.info(f"Attempt {attempt + 1} failed with error: {str(e)}")
-                    if isinstance(e, ValueError):
-                        try:
-                            eval_logger.info(f"Prompt feed_back: {content.prompt_feedback}")
+            contents = []
+            for index, message in enumerate(messages):
+                if index == 0:
+                    if visuals != [None]: # always follow gemini's suggestion that take video first
+                        chat_session = self.model.start_chat(
+                            history=[
+                                {
+                                    "role": "user",
+                                    "parts": [visuals[0]]
+                                },
+                            ])
+                    else:
+                        chat_session = self.model.start_chat()
+
+                for attempt in range(5):
+                    try:
+                        content = chat_session.send_message(message)
+                        content = content.text
+                        if isinstance(message, str):
+                            contents.append(message)
+                        contents.append(content)
+                        print(message)
+                        print(content)
+                        break
+                    except Exception as e:
+                        eval_logger.info(f"Attempt {attempt + 1} failed with error: {str(e)}")
+                        if isinstance(e, ValueError):
+                            try:
+                                eval_logger.info(f"Prompt feed_back: {content.prompt_feedback}")
+                                content = ""
+                                break
+                            except Exception:
+                                pass
+                        if attempt < 5 - 1:  # If we have retries left, sleep and then continue to next attempt
+                            time.sleep(NUM_SECONDS_TO_SLEEP)
+                        else:  # If this was the last attempt, log and return empty
+                            eval_logger.error(f"All 5 attempts failed. Last error message: {str(e)}")
                             content = ""
-                            break
-                        except Exception:
-                            pass
-                    if attempt < 5 - 1:  # If we have retries left, sleep and then continue to next attempt
-                        time.sleep(NUM_SECONDS_TO_SLEEP)
-                    else:  # If this was the last attempt, log and return empty
-                        eval_logger.error(f"All 5 attempts failed. Last error message: {str(e)}")
-                        content = ""
-                        if isinstance(e, ResourceExhausted):
-                            eval_logger.error("Quota exceed!!!")
-            res.append(content)
+                            if isinstance(e, ResourceExhausted):
+                                eval_logger.error("Quota exceed!!!")
+            res.append(json.dumps(contents))
             pbar.update(1)
 
             if self.continual_mode is True:  # Cache the response

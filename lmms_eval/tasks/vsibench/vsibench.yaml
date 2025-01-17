@@ -29,7 +29,7 @@ lmms_eval_specific_kwargs:
     mca_post_prompt: "Answer with the option's letter from the given choices directly."
     na_post_prompt: "Please answer the question using a single word or phrase."
   gemini_api:
-    pre_prompt: ""
+    pre_prompt: "According to the original video and the predicted objects' center locations, answer the following question:"
     mca_post_prompt: "Answer with the option's letter from the given choices directly."
     na_post_prompt: "Do not response anything other than a single number!"
   gpt4v:
