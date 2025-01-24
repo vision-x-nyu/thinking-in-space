@@ -61,6 +61,18 @@ def extract_categories_of_interest(doc):
         pattern = pattern.replace(r'\{positioning_object\}', r'(?P<positioning_object>.+?)')
         pattern = pattern.replace(r'\{orienting_object\}', r'(?P<orienting_object>.+?)')
         pattern = pattern.replace(r'\{querying_object\}', r'(?P<querying_object>.+?)')
+        
+        if doc['question_type'] == "object_rel_direction_easy":
+            pattern = re.compile(
+                r"^If I am standing by the "
+                r"(?P<positioning_object>.*?)"
+                r" and facing the "
+                r"(?P<orienting_object>.*?)"
+                r", is the "
+                r"(?P<querying_object>.*?)"
+                r" to the left or the right of the "
+                r"(?P=orienting_object)\?$"
+            )
     elif doc['question_type'].startswith('object_rel_distance'):
         pattern = re.escape(OBJ_REL_DISTANCE_TEMPLATE)
         pattern = pattern.replace(r'\{choice_a\}', r'(?P<choice_a>.+?)')
