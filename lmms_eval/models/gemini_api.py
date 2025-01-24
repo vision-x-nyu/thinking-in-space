@@ -31,7 +31,6 @@ except Exception as e:
 
 OBJ_REL_DISTANCE_TEMPLATE = """
 Measuring from the closest point of each object, which of these objects ({choice_a}, {choice_b}, {choice_c}, {choice_d}) is the closest to the {category}?
-If there are multiple instances of an object category, measure to the closest.
 """.strip()
 
 OBJ_REL_DIRECTION_HARD_TEMPLATE = """
